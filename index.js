@@ -1,76 +1,94 @@
 const { Client, LocalAuth } = require('whatsapp-web.js');
 const qrcode = require('qrcode-terminal');
-const axios = require('axios');
 const express = require('express');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-// Configurações
-const DEEPSEEK_API_KEY = process.env.DEEPSEEK_API_KEY;
-const DEEPSEEK_URL = 'https://api.deepseek.com/v1/chat/completions';
+// ✅ CONFIGURAÇÃO GEMINI (GRATUITA)
+const GEMINI_API_KEY = process.env.GEMINI_API_KEY; // Sua chave do Google AI Studio
+const GEMINI_URL = `https://generativelanguage.googleapis.com/v1beta/models/gemini-pro:generateContent`;
 
 // Servidor web
-app.use(express.json());
-app.get('/', (req, res) => {
-    res.json({ 
-        status: 'online', 
-        bot: 'Vex - IA Inteligente',
-        features: 'Linguagem natural, listas permanentes'
-    });
-});
+app.get('/', (req, res) => res.json({ status: 'online', bot: 'Vex Gemini' }));
+app.listen(PORT, () => console.log(`🌐 Servidor porta ${PORT}`));
 
-app.listen(PORT, () => {
-    console.log(`🌐 Servidor web na porta ${PORT}`);
-});
-
-// ✅ SESSÃO PERSISTENTE
+// ✅ CONFIGURAÇÃO ESTÁVEL DO WHATSAPP
 const client = new Client({
     authStrategy: new LocalAuth({
-        clientId: "vex-bot-permanent-v2"
+        clientId: "vex-gemini-permanent",
+        dataPath: "./sessions"
     }),
     puppeteer: {
-        args: ['--no-sandbox', '--disable-setuid-sandbox'],
+        args: [
+            '--no-sandbox',
+            '--disable-setuid-sandbox',
+            '--disable-dev-shm-usage',
+            '--disable-accelerated-2d-canvas',
+            '--no-first-run',
+            '--no-zygote'
+        ],
         headless: true
     },
-    webVersionCache: {
-        type: 'remote',
-        remotePath: 'https://raw.githubusercontent.com/wppconnect-team/wa-version/main/html/2.2412.54.html'
-    }
+    // ✅ RECONEXÃO AUTOMÁTICA
+    restartOnAuthFail: true,
+    takeoverOnConflict: true,
+    takeoverTimeoutMs: 15000
 });
 
-// ✅ BANCO DE DADOS SIMPLES
+// ✅ BANCO DE DADOS
 let lists = {
-    entretenimento: [], // 🎬 NUNCA reseta
-    compras: [],        // 🛒 Reseta manualmente
-    gastos: []          // 💰 Reseta mensalmente
-};
-
-let lastReset = {
-    compras: new Date(),
-    gastos: new Date()
+    entretenimento: [],
+    compras: [], 
+    gastos: []
 };
 
 let authorizedGroups = new Set();
+let isConnected = false;
 
+// ✅ EVENTOS MELHORADOS
 client.on('qr', (qr) => {
     console.log('📱 QR Code para conexão INICIAL:');
     qrcode.generate(qr, {small: true});
-    console.log('💡 Escaneie UMA VEZ - sessão permanente');
+    console.log('💡 Escaneie UMA VEZ - sessão será salva');
 });
 
 client.on('authenticated', () => {
-    console.log('✅ SESSÃO SALVA - Reconexão automática ativa');
+    console.log('✅ Autenticado - Sessão salva!');
+});
+
+client.on('auth_failure', (msg) => {
+    console.log('❌ Falha na autenticação:', msg);
 });
 
 client.on('ready', () => {
-    console.log('🚀 VEX CONECTADO PERMANENTEMENTE!');
-    console.log('🧠 Modo: Linguagem natural com IA');
-    console.log('💾 Listas: Entretenimento (permanente), Compras/Gastos (resetáveis)');
+    isConnected = true;
+    console.log('🚀 VEX GEMINI CONECTADO!');
+    console.log('🔒 Sessão permanente ativa');
+    console.log('🧠 Gemini: ' + (GEMINI_API_KEY ? '✅ Conectado' : '❌ Usando modo local'));
 });
 
-// ✅ PROCESSAMENTO DE MENSAGENS
+// ✅ RECONEXÃO AUTOMÁTICA
+client.on('disconnected', (reason) => {
+    isConnected = false;
+    console.log('❌ Desconectado:', reason);
+    console.log('🔄 Reconectando em 10 segundos...');
+    
+    setTimeout(() => {
+        console.log('🔄 Tentando reconectar...');
+        client.initialize().catch(err => {
+            console.log('❌ Erro na reconexão:', err);
+        });
+    }, 10000);
+});
+
+// ✅ PROCESSAMENTO ESTÁVEL
 client.on('message', async (message) => {
+    if (!isConnected) {
+        console.log('⏳ Bot desconectado, ignorando mensagem...');
+        return;
+    }
+    
     if (message.from === 'status@broadcast') return;
     
     const isGroup = message.from.includes('@g.us');
@@ -81,387 +99,291 @@ client.on('message', async (message) => {
     console.log(`💬 Mensagem: "${message.body}"`);
     
     try {
-        const response = await processWithAI(message.body, message.from);
+        const response = await processWithGemini(message.body);
         if (response) {
             await message.reply(response);
+            console.log('✅ Resposta enviada');
         }
     } catch (error) {
-        console.error('❌ Erro:', error);
-        message.reply('🤖 Desculpe, tive um problema. Tente novamente.');
+        console.error('❌ Erro no processamento:', error.message);
+        // ✅ NÃO PARA O BOT SE HOUVER ERRO
+        try {
+            await message.reply('🤖 Tive um problema, mas estou funcionando! Tente novamente.');
+        } catch (e) {
+            console.log('❌ Erro ao enviar mensagem de erro:', e);
+        }
     }
 });
 
-// ✅ IA PARA PROCESSAMENTO DE LINGUAGEM NATURAL
-async function processWithAI(userMessage, context) {
+// ✅ GEMINI API (GRATUITA)
+async function callGeminiAI(prompt) {
+    if (!GEMINI_API_KEY) {
+        throw new Error('Gemini API Key não configurada');
+    }
+    
+    const response = await fetch(`${GEMINI_URL}?key=${GEMINI_API_KEY}`, {
+        method: 'POST',
+        headers: {
+            'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+            contents: [{
+                parts: [{
+                    text: prompt
+                }]
+            }],
+            generationConfig: {
+                temperature: 0.3,
+                maxOutputTokens: 500,
+            }
+        })
+    });
+
+    if (!response.ok) {
+        throw new Error(`Gemini API error: ${response.status}`);
+    }
+
+    const data = await response.json();
+    return data.candidates[0].content.parts[0].text.trim();
+}
+
+// ✅ PROCESSAMENTO COM GEMINI
+async function processWithGemini(userMessage) {
+    // Comando especial de ativação
+    if (userMessage.toLowerCase() === '/adicionar vex') {
+        authorizedGroups.add(message.from);
+        return `🤖 *Vex Gemini Ativado!*
+        
+Fale naturalmente:
+🎬 "Quero assistir Interestelar"
+💰 "Gastei 25 no uber"  
+🛒 "Preciso comprar pão e leite"
+📊 "Mostrar minhas listas"
+
+*Comandos:*
+"Já assisti NOME" → Marca como visto
+"Limpar compras" → Reseta lista
+"Resetar gastos" → Zera gastos`;
+    }
+
     try {
-        const prompt = `Analise esta mensagem e determine a ação. Opções:
+        const prompt = `Você é o Vex, um assistente para organizar listas. 
 
-ENTRETENIMENTO - Adicionar filme/série/livro (lista PERMANENTE)
-COMPRAS - Adicionar item à lista de compras (lista TEMPORÁRIA) 
-GASTOS - Registrar gasto financeiro (lista TEMPORÁRIA)
-CONSULTA - Mostrar listas
-REMOVER - Remover item específico (só entretenimento)
-RESET - Limpar lista de compras ou gastos
-AJUDA - Ajuda geral
+LISTAS:
+- ENTRETENIMENTO: filmes, séries, livros (NUNCA reseta)
+- COMPRAS: itens de mercado (reseta com "limpar compras")  
+- GASTOS: despesas financeiras (reseta com "resetar gastos")
 
-Mensagem: "${userMessage}"
+Analise a mensagem e responda em JSON:
 
-Responda em JSON:
+MENSAGEM: "${userMessage}"
+
+JSON:
 {
-  "acao": "ENTRETENIMENTO|COMPRAS|GASTOS|CONSULTA|REMOVER|RESET|AJUDA",
-  "dados": {dados relevantes},
-  "resposta": "resposta em português"
+  "acao": "ADICIONAR_ENTRETENIMENTO|ADICIONAR_COMPRAS|ADICIONAR_GASTOS|CONSULTAR|MARCAR_VISTO|RESETAR|AJUDA",
+  "dados": {"item": "nome", "valor": número, "categoria": "tipo"},
+  "resposta": "resposta amigável em português"
 }`;
 
-        const aiResponse = await callDeepSeekAI(prompt, "Você é o Vex, um assistente inteligente para organizar listas.");
+        const aiResponse = await callGeminiAI(prompt);
         
+        // Extrair JSON da resposta
         const jsonMatch = aiResponse.match(/\{[\s\S]*\}/);
         if (!jsonMatch) {
-            return await fallbackProcessing(userMessage);
+            return await processFallback(userMessage);
         }
         
         const actionData = JSON.parse(jsonMatch[0]);
-        return await executeAction(actionData, userMessage, context);
+        return await executeGeminiAction(actionData, userMessage);
         
     } catch (error) {
-        console.error('Erro na IA:', error);
-        return await fallbackProcessing(userMessage);
+        console.log('❌ Gemini falhou, usando fallback:', error.message);
+        return await processFallback(userMessage);
     }
 }
 
-// ✅ EXECUTAR AÇÃO DA IA
-async function executeAction(actionData, originalMessage, context) {
+// ✅ EXECUTAR AÇÃO DO GEMINI
+async function executeGeminiAction(actionData, originalMessage) {
     switch(actionData.acao) {
-        case 'ENTRETENIMENTO':
-            return await addEntertainment(originalMessage);
+        case 'ADICIONAR_ENTRETENIMENTO':
+            return addEntertainment(actionData.dados?.item || originalMessage);
             
-        case 'COMPRAS':
-            return await addShoppingItem(originalMessage);
+        case 'ADICIONAR_COMPRAS':
+            return addShopping(actionData.dados?.item || originalMessage);
             
-        case 'GASTOS':
-            return await addExpense(originalMessage);
+        case 'ADICIONAR_GASTOS':
+            return addExpense(actionData.dados || originalMessage);
             
-        case 'CONSULTA':
+        case 'CONSULTAR':
             return showAllLists();
             
-        case 'REMOVER':
-            return await removeEntertainmentItem(originalMessage);
+        case 'MARCAR_VISTO':
+            return markAsWatched(actionData.dados?.item || originalMessage);
             
-        case 'RESET':
+        case 'RESETAR':
             return resetLists(originalMessage);
             
         case 'AJUDA':
-            return getSmartHelp();
+            return getHelp();
             
         default:
-            return await fallbackProcessing(originalMessage);
+            return await processFallback(originalMessage);
     }
 }
 
-// ✅ ADICIONAR ENTRETENIMENTO (PERMANENTE)
-async function addEntertainment(message) {
-    try {
-        const prompt = `Extraia o nome do conteúdo de entretenimento e categorize. Mensagem: "${message}" - Formato: nome|categoria`;
-        
-        const response = await callDeepSeekAI(prompt, "Você identifica conteúdos de entretenimento.");
-        const [name, category] = response.split('|');
-        
-        if (!name) return "🎬 Não identifiquei o que quer adicionar. Ex: 'Quero assistir Interestelar'";
-        
-        // Verificar se já existe
-        const exists = lists.entretenimento.find(item => 
-            item.name.toLowerCase().includes(name.toLowerCase()) || 
-            name.toLowerCase().includes(item.name.toLowerCase())
-        );
-        
-        if (exists) {
-            return `🎬 "${exists.name}" já está na lista como ${exists.category}!`;
-        }
-        
-        lists.entretenimento.push({
-            name: name.trim(),
-            category: (category || 'filme').trim().toLowerCase(),
-            added: new Date().toLocaleDateString('pt-BR'),
-            watched: false
-        });
-        
-        return `🎬 "${name}" adicionado como ${category || 'filme'}! Lista atual: ${lists.entretenimento.length} itens.`;
-        
-    } catch (error) {
-        // Fallback simples
-        lists.entretenimento.push({
-            name: message,
-            category: 'entretenimento',
-            added: new Date().toLocaleDateString('pt-BR'),
-            watched: false
-        });
-        return `🎬 "${message}" adicionado à lista!`;
-    }
-}
-
-// ✅ ADICIONAR COMPRAS
-async function addShoppingItem(message) {
-    try {
-        const prompt = `Extraia os itens de compra desta mensagem: "${message}" - Responda com lista separada por vírgulas.`;
-        
-        const response = await callDeepSeekAI(prompt, "Você identifica itens de lista de compras.");
-        const items = response.split(',').map(item => item.trim()).filter(item => item);
-        
-        if (items.length === 0) {
-            return "🛒 Não identifiquei itens. Ex: 'Preciso comprar leite e pão'";
-        }
-        
-        let added = 0;
-        items.forEach(item => {
-            if (!lists.compras.find(i => i.toLowerCase() === item.toLowerCase())) {
-                lists.compras.push(item);
-                added++;
-            }
-        });
-        
-        return `🛒 ${added} item(s) adicionado(s)! Lista de compras: ${lists.compras.length} itens.`;
-        
-    } catch (error) {
-        // Fallback
-        if (!lists.compras.includes(message)) {
-            lists.compras.push(message);
-        }
-        return `🛒 "${message}" adicionado às compras!`;
-    }
-}
-
-// ✅ ADICIONAR GASTOS
-async function addExpense(message) {
-    try {
-        const prompt = `Extraia descrição e valor deste gasto: "${message}" - Formato: descricao|valor`;
-        
-        const response = await callDeepSeekAI(prompt, "Você extrai informações financeiras.");
-        const [description, valueStr] = response.split('|');
-        
-        if (!description || !valueStr) {
-            return "💰 Não entendi o gasto. Ex: 'Gastei 25 reais no uber'";
-        }
-        
-        const value = parseFloat(valueStr.replace(',', '.'));
-        
-        lists.gastos.push({
-            description: description.trim(),
-            value: value,
-            date: new Date().toLocaleDateString('pt-BR'),
-            category: await categorizeExpense(description)
-        });
-        
-        const total = lists.gastos.reduce((sum, item) => sum + item.value, 0);
-        return `✅ ${description.trim()} - R$ ${value.toFixed(2)} registrado! Total do mês: R$ ${total.toFixed(2)}`;
-        
-    } catch (error) {
-        return "💰 Formato: 'descrição valor'. Ex: 'jantar 80' ou 'uber 25'";
-    }
-}
-
-// ✅ CATEGORIZAR GASTOS COM IA
-async function categorizeExpense(description) {
-    try {
-        const prompt = `Categorize este gasto: "${description}" - Opções: alimentação, transporte, lazer, casa, saúde, outros`;
-        const category = await callDeepSeekAI(prompt, "Você categoriza gastos financeiros.");
-        return category.toLowerCase();
-    } catch (error) {
-        return 'outros';
-    }
-}
-
-// ✅ REMOVER ENTRETENIMENTO (APENAS MARCA COMO ASSISTIDO)
-async function removeEntertainmentItem(message) {
-    try {
-        const prompt = `Qual conteúdo foi assistido/lido? Mensagem: "${message}" - Responda com o nome exato.`;
-        
-        const itemName = await callDeepSeekAI(prompt, "Você identifica conteúdos de entretenimento.");
-        
-        const item = lists.entretenimento.find(item => 
-            item.name.toLowerCase().includes(itemName.toLowerCase()) ||
-            itemName.toLowerCase().includes(item.name.toLowerCase())
-        );
-        
-        if (item) {
-            item.watched = true;
-            item.watchedDate = new Date().toLocaleDateString('pt-BR');
-            return `✅ "${item.name}" marcado como assistido! 🎉`;
-        } else {
-            const suggestions = lists.entretenimento.filter(item => !item.watched).slice(0, 3);
-            if (suggestions.length > 0) {
-                return `❌ Não encontrei "${itemName}". Itens na lista: ${suggestions.map(i => i.name).join(', ')}`;
-            }
-            return "❌ Não encontrei na lista. Use 'mostrar lista' para ver todos.";
-        }
-        
-    } catch (error) {
-        return "❌ Não consegui identificar o que quer remover. Ex: 'Já assisti Interestelar'";
-    }
-}
-
-// ✅ RESET DE LISTAS
-function resetLists(message) {
-    const lowerMessage = message.toLowerCase();
+// ✅ FUNÇÕES PRINCIPAIS
+function addEntertainment(item) {
+    const entertainmentItem = {
+        name: item,
+        category: 'filme/série',
+        added: new Date().toLocaleDateString('pt-BR'),
+        watched: false
+    };
     
-    if (lowerMessage.includes('compra') || lowerMessage.includes('mercado')) {
+    // Verificar duplicata
+    const exists = lists.entretenimento.find(i => 
+        i.name.toLowerCase().includes(item.toLowerCase()) ||
+        item.toLowerCase().includes(i.name.toLowerCase())
+    );
+    
+    if (exists) {
+        return `🎬 "${exists.name}" já está na lista!`;
+    }
+    
+    lists.entretenimento.push(entertainmentItem);
+    return `🎬 "${item}" adicionado! Lista: ${lists.entretenimento.length} itens`;
+}
+
+function addShopping(item) {
+    const items = item.split(',').map(i => i.trim()).filter(i => i);
+    
+    let added = 0;
+    items.forEach(singleItem => {
+        if (!lists.compras.find(i => i.toLowerCase() === singleItem.toLowerCase())) {
+            lists.compras.push(singleItem);
+            added++;
+        }
+    });
+    
+    return `🛒 ${added} item(s) adicionado(s)! Lista: ${lists.compras.length} itens`;
+}
+
+function addExpense(dados) {
+    let description, value;
+    
+    if (typeof dados === 'string') {
+        const match = dados.match(/(.+?)\s+([\d,\.]+)/) || dados.match(/([\d,\.]+)\s+(.+)/);
+        if (match) {
+            description = match[1] ? match[1].trim() : match[2].trim();
+            value = parseFloat((match[2] || match[1]).replace(',', '.'));
+        }
+    } else {
+        description = dados.item || 'Gasto';
+        value = dados.valor || 0;
+    }
+    
+    if (!description || !value) {
+        return "💰 Não entendi o gasto. Ex: 'Gastei 25 no uber'";
+    }
+    
+    lists.gastos.push({
+        description: description,
+        value: value,
+        date: new Date().toLocaleDateString('pt-BR')
+    });
+    
+    const total = lists.gastos.reduce((sum, item) => sum + item.value, 0);
+    return `✅ ${description} - R$ ${value.toFixed(2)} registrado! Total: R$ ${total.toFixed(2)}`;
+}
+
+function markAsWatched(itemName) {
+    const item = lists.entretenimento.find(item => 
+        !item.watched && 
+        item.name.toLowerCase().includes(itemName.toLowerCase())
+    );
+    
+    if (item) {
+        item.watched = true;
+        return `✅ "${item.name}" marcado como assistido! 🎉`;
+    }
+    
+    return "❌ Não encontrei na lista. Use 'mostrar listas' para ver todos.";
+}
+
+function resetLists(message) {
+    const lower = message.toLowerCase();
+    
+    if (lower.includes('compra')) {
         const count = lists.compras.length;
         lists.compras = [];
-        lastReset.compras = new Date();
-        return `🗑️ Lista de compras limpa! ${count} itens removidos.`;
+        return `🛒 Lista de compras limpa! ${count} itens removidos.`;
     }
     
-    if (lowerMessage.includes('gasto') || lowerMessage.includes('dinheiro')) {
+    if (lower.includes('gasto')) {
         const count = lists.gastos.length;
         const total = lists.gastos.reduce((sum, item) => sum + item.value, 0);
         lists.gastos = [];
-        lastReset.gastos = new Date();
-        return `🗑️ Gastos do mês resetados! ${count} gastos (R$ ${total.toFixed(2)}) removidos.`;
+        return `💰 Gastos resetados! ${count} gastos (R$ ${total.toFixed(2)}) removidos.`;
     }
     
     return "❌ Especifique: 'limpar compras' ou 'resetar gastos'";
 }
 
-// ✅ MOSTRAR TODAS AS LISTAS
 function showAllLists() {
-    const entretenimentoAtivos = lists.entretenimento.filter(item => !item.watched);
-    const entretenimentoAssistidos = lists.entretenimento.filter(item => item.watched);
+    const ativos = lists.entretenimento.filter(item => !item.watched);
+    const assistidos = lists.entretenimento.filter(item => item.watched);
     const totalGastos = lists.gastos.reduce((sum, item) => sum + item.value, 0);
     
-    let response = `📊 *LISTAS DO VEX*\n\n`;
-    
-    // 🎬 Entretenimento
-    response += `🎬 *Para Assistir/Ler* (${entretenimentoAtivos.length}):\n`;
-    if (entretenimentoAtivos.length > 0) {
-        entretenimentoAtivos.forEach((item, index) => {
-            response += `${index + 1}. ${item.name} (${item.category})\n`;
-        });
-    } else {
-        response += `Nada na lista 🎉\n`;
-    }
-    
-    response += `\n✅ *Já Vistos* (${entretenimentoAssistidos.length}):\n`;
-    if (entretenimentoAssistidos.length > 0) {
-        response += entretenimentoAssistidos.map(item => `• ${item.name}`).join('\n');
-    } else {
-        response += `Nada ainda\n`;
-    }
-    
-    // 🛒 Compras
-    response += `\n🛒 *Compras* (${lists.compras.length}):\n`;
-    if (lists.compras.length > 0) {
-        lists.compras.forEach((item, index) => {
-            response += `${index + 1}. ${item}\n`;
-        });
-    } else {
-        response += `Lista vazia 🛍️\n`;
-    }
-    
-    // 💰 Gastos
-    response += `\n💰 *Gastos do Mês* (${lists.gastos.length}):\n`;
-    if (lists.gastos.length > 0) {
-        const byCategory = {};
-        lists.gastos.forEach(item => {
-            byCategory[item.category] = (byCategory[item.category] || 0) + item.value;
-        });
-        
-        Object.entries(byCategory).forEach(([category, total]) => {
-            response += `• ${category}: R$ ${total.toFixed(2)}\n`;
-        });
-        response += `Total: R$ ${totalGastos.toFixed(2)}\n`;
-    } else {
-        response += `Nenhum gasto registrado 💵\n`;
-    }
-    
-    return response;
+    return `📊 *LISTAS DO VEX*
+
+🎬 *Para Ver* (${ativos.length}):
+${ativos.map(item => `• ${item.name}`).join('\n') || 'Nada 🎉'}
+
+✅ *Assistidos* (${assistidos.length}):
+${assistidos.map(item => `• ${item.name}`).join('\n') || 'Nada ainda'}
+
+🛒 *Compras* (${lists.compras.length}):
+${lists.compras.map(item => `• ${item}`).join('\n') || 'Lista vazia'}
+
+💰 *Gastos*: R$ ${totalGastos.toFixed(2)} (${lists.gastos.length})`;
 }
 
-// ✅ AJUDA INTELIGENTE
-function getSmartHelp() {
-    return `🤖 *VEX - AJUDA INTELIGENTE*
+function getHelp() {
+    return `🤖 *VEX GEMINI - AJUDA*
 
-*Fale naturalmente!* Exemplos:
+Fale naturalmente:
+🎬 "Interestelar" → Adiciona filme
+💰 "Gastei 25 no uber" → Registra gasto  
+🛒 "Pão, leite" → Adiciona compras
 
-🎬 *Entretenimento (PERMANENTE):*
-"Quero assistir Interestelar"
-"Adiciona Stranger Things na lista"
-"Já assisti Oppenheimer" ✅
+Comandos:
+"Já assisti NOME" → Marca como visto
+"Limpar compras" → Esvazia lista
+"Resetar gastos" → Zera gastos
+"Mostrar listas" → Ver tudo
 
-🛒 *Compras (resetável):*
-"Preciso comprar leite e pão"
-"Adiciona café na lista do mercado"
-"limpar lista de compras" 🗑️
-
-💰 *Gastos (resetável):*
-"Gastei 25 no uber"
-"Almoço 45 reais"
-"resetar gastos do mês" 🗑️
-
-📊 *Consultas:*
-"mostrar todas as listas"
-"o que tem pra assistir?"
-
-*Lembre: Entretenimento fica pra sempre, compras/gastos podem ser resetados!*`;
+💡 *Entretenimento fica pra sempre!*`;
 }
 
-// ✅ FALLBACK PARA IA
-async function fallbackProcessing(message) {
-    const lowerMessage = message.toLowerCase();
+// ✅ FALLBACK ESTÁVEL (SE GEMINI FALHAR)
+async function processFallback(message) {
+    const lower = message.toLowerCase();
     
-    if (lowerMessage.includes('ajuda') || lowerMessage === '?') {
-        return getSmartHelp();
-    }
+    if (lower.includes('ajuda') || lower === '?') return getHelp();
+    if (lower.includes('lista') || lower.includes('mostrar')) return showAllLists();
+    if (lower.includes('limpar') || lower.includes('reset')) return resetLists(message);
+    if (lower.includes('assisti') || lower.includes('já vi')) return markAsWatched(message);
     
-    if (lowerMessage.includes('lista') || lowerMessage.includes('mostrar') || lowerMessage.includes('ver ')) {
-        return showAllLists();
-    }
+    if (/\d/.test(message) && lower.includes('gastei')) return addExpense(message);
+    if (lower.includes('compr') || message.includes(',')) return addShopping(message);
     
-    if (lowerMessage.includes('limpar') || lowerMessage.includes('reset')) {
-        return resetLists(message);
-    }
-    
-    if (lowerMessage.includes('assisti') || lowerMessage.includes('vi ') || lowerMessage.includes('já ')) {
-        return await removeEntertainmentItem(message);
-    }
-    
-    if (/\d/.test(message) && (lowerMessage.includes('r$') || lowerMessage.includes('real') || lowerMessage.includes('gastei'))) {
-        return await addExpense(message);
-    }
-    
-    if (lowerMessage.includes('compr') || lowerMessage.includes('mercado') || lowerMessage.includes('super')) {
-        return await addShoppingItem(message);
-    }
-    
-    // Padrão fallback - assume entretenimento
-    return await addEntertainment(message);
+    return addEntertainment(message);
 }
 
-// ✅ IA DEEPSEEK
-async function callDeepSeekAI(prompt, systemMessage = "Você é um assistente útil.") {
-    if (!DEEPSEEK_API_KEY) {
-        throw new Error('API não configurada');
-    }
-    
-    const response = await axios.post(DEEPSEEK_URL, {
-        model: 'deepseek-chat',
-        messages: [
-            { role: 'system', content: systemMessage },
-            { role: 'user', content: prompt }
-        ],
-        max_tokens: 500,
-        temperature: 0.3
-    }, {
-        headers: {
-            'Authorization': `Bearer ${DEEPSEEK_API_KEY}`,
-            'Content-Type': 'application/json'
-        },
-        timeout: 10000
-    });
+// ✅ INICIALIZAÇÃO SEGURA
+client.initialize().catch(error => {
+    console.error('❌ Erro fatal na inicialização:', error);
+});
 
-    return response.data.choices[0].message.content.trim();
-}
-
-// ✅ INICIALIZAÇÃO
-client.initialize();
-
-console.log('🔄 Vex Bot - Versão Definitiva Iniciando...');
-console.log('🧠 IA: ' + (DEEPSEEK_API_KEY ? '✅ Conectada' : '❌ Offline'));
+console.log('🔄 Vex Gemini Iniciando...');
+console.log('🔧 Configurado para reconexão automática');
