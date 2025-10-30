@@ -1,11 +1,19 @@
 const { Client, LocalAuth } = require('whatsapp-web.js');
 const qrcode = require('qrcode-terminal');
 const axios = require('axios');
+const express = require('express');
 
+const app = express();
+const PORT = process.env.PORT || 3000;
+
+// Configuração do WhatsApp
 const client = new Client({
-    authStrategy: new LocalAuth(),
+    authStrategy: new LocalAuth({
+        clientId: "vex-bot"
+    }),
     puppeteer: {
-        args: ['--no-sandbox', '--disable-setuid-sandbox']
+        args: ['--no-sandbox', '--disable-setuid-sandbox'],
+        headless: true
     }
 });
 
@@ -15,17 +23,43 @@ const DEEPSEEK_URL = 'https://api.deepseek.com/v1/chat/completions';
 
 // Banco de dados em memória
 let groupData = {};
-let authorizedGroups = new Set(); // Grupos onde Vex está autorizado
+let authorizedGroups = new Set();
 
+// ✅ SERVIDOR WEB PARA O RENDER
+app.use(express.json());
+
+app.get('/', (req, res) => {
+    res.json({ 
+        status: 'online',
+        bot: 'Vex',
+        message: 'Bot WhatsApp está funcionando!'
+    });
+});
+
+app.get('/health', (req, res) => {
+    res.json({ 
+        status: 'healthy',
+        timestamp: new Date().toISOString(),
+        authorizedGroups: authorizedGroups.size
+    });
+});
+
+app.listen(PORT, () => {
+    console.log(`🌐 Servidor web rodando na porta ${PORT}`);
+});
+
+// EVENTOS DO WHATSAPP
 client.on('qr', (qr) => {
-    console.log('📱 Escaneie este QR code com seu WhatsApp:');
+    console.log('📱 QR Code para conexão:');
     qrcode.generate(qr, {small: true});
+    console.log('💡 Escaneie este QR code no WhatsApp');
 });
 
 client.on('ready', () => {
     console.log('✅ Vex Bot com IA conectado!');
     console.log('🧠 Usando DeepSeek para categorização inteligente');
     console.log('🔒 Vex só responderá em grupos autorizados com "/adicionar vex"');
+    console.log(`🌐 Servidor health: http://localhost:${PORT}/health`);
 });
 
 client.on('message', async (message) => {
@@ -42,7 +76,16 @@ client.on('message', async (message) => {
     }
 });
 
-// Função principal do Vex
+// 🔥 ADICIONE ESTA PARTE CRÍTICA PARA EVITAR MEMÓRIA
+client.on('disconnected', (reason) => {
+    console.log('❌ Bot desconectado:', reason);
+    console.log('🔄 Reiniciando em 5 segundos...');
+    setTimeout(() => {
+        client.initialize();
+    }, 5000);
+});
+
+// FUNÇÃO PRINCIPAL DO VEX (MANTENHA TODO O CÓDIGO ANTERIOR AQUI)
 async function processVexMessage(message) {
     const groupId = message.from;
     const userMessage = message.body.trim();
@@ -55,6 +98,7 @@ async function processVexMessage(message) {
     // Comando para adicionar Vex ao grupo
     if (userMessage.toLowerCase() === '/adicionar vex') {
         authorizedGroups.add(groupId);
+        console.log(`✅ Vex autorizado no grupo: ${groupId}`);
         return `🤖 *Vex ativado!* 
         
 Agora estou pronto para ajudar neste grupo! 
@@ -122,6 +166,7 @@ Agora estou pronto para ajudar neste grupo!
 // 🧠 FUNÇÃO PRINCIPAL DE IA
 async function callDeepSeekAI(prompt, systemMessage = "Você é um assistente útil.") {
     if (!DEEPSEEK_API_KEY) {
+        console.log('⚠️ API Key do DeepSeek não configurada');
         throw new Error('API Key do DeepSeek não configurada');
     }
     
@@ -149,45 +194,31 @@ async function callDeepSeekAI(prompt, systemMessage = "Você é um assistente ú
     }
 }
 
-// 🎬 ENTERTENIMENTO COM IA
+// 🎯 FUNÇÕES SIMPLIFICADAS PARA TESTE
 async function processEntertainmentItemWithAI(message, groupId) {
     if (message.length < 2) return null;
     
     try {
-        const categoryPrompt = `Categorize este conteúdo em: filme, série, desenho, documentário, anime, livro, outros. Conteúdo: "${message}" - Responda APENAS com o nome da categoria.`;
-        
-        const category = await callDeepSeekAI(categoryPrompt, "Você categoriza conteúdos de entretenimento.");
+        const category = await callDeepSeekAI(`Categorize: "${message}" - Responda com: filme, série, desenho, documentário, anime, livro, outros.`);
         
         if (!groupData[groupId].items) groupData[groupId].items = [];
         
-        const existingItem = groupData[groupId].items.find(i => 
-            i.name.toLowerCase() === message.toLowerCase()
-        );
+        groupData[groupId].items.push({
+            name: message,
+            category: category.toLowerCase(),
+            added: new Date().toLocaleDateString('pt-BR')
+        });
         
-        if (!existingItem) {
-            groupData[groupId].items.push({
-                name: message,
-                category: category.toLowerCase(),
-                added: new Date().toLocaleDateString('pt-BR'),
-                addedBy: getSenderName(message)
-            });
-            
-            return `🎬 "${message}" adicionado como ${category}!`;
-        }
-        
-        return `ℹ️ "${message}" já está na lista.`;
+        return `🎬 "${message}" adicionado como ${category}!`;
         
     } catch (error) {
         return `🎬 "${message}" adicionado à lista!`;
     }
 }
 
-// 💰 GASTOS COM IA
 async function processExpenseItemWithAI(message, groupId) {
     try {
-        const expensePrompt = `Extraia descrição e valor deste gasto e categorize em: mercado, transporte, lazer, comida, saúde, educação, contas, outros. Mensagem: "${message}" - Responda no formato: descricao|valor|categoria`;
-
-        const aiResponse = await callDeepSeekAI(expensePrompt, "Você extrai informações de gastos financeiros.");
+        const aiResponse = await callDeepSeekAI(`Extraia: "${message}" - Formato: descricao|valor|categoria`);
         
         const parts = aiResponse.split('|');
         if (parts.length !== 3) throw new Error('Formato inválido');
@@ -202,32 +233,23 @@ async function processExpenseItemWithAI(message, groupId) {
             description: description,
             value: value,
             category: category,
-            date: new Date().toLocaleDateString('pt-BR'),
-            addedBy: getSenderName(message)
+            date: new Date().toLocaleDateString('pt-BR')
         });
-        
-        const itemCount = groupData[groupId].items.length;
-        if (itemCount % 3 === 0) {
-            return getExpensesSummary(groupId);
-        }
         
         return `✅ ${description} - R$ ${value.toFixed(2)} (${category})`;
         
     } catch (error) {
-        return "💰 Formato: 'descrição valor' - Ex: 'uber 15' ou 'mercado 150'";
+        return "💰 Formato: 'descrição valor' - Ex: 'uber 15'";
     }
 }
 
-// 🛒 COMPRAS COM IA
 async function processShoppingItemWithAI(message, groupId) {
     if (message.toLowerCase().includes('mostrar')) {
         return getShoppingList(groupId);
     }
     
     try {
-        const shoppingPrompt = `Liste os itens de compra desta mensagem: "${message}" - Responda com os itens separados por vírgula.`;
-
-        const aiResponse = await callDeepSeekAI(shoppingPrompt, "Você identifica itens de lista de compras.");
+        const aiResponse = await callDeepSeekAI(`Liste itens: "${message}" - Separe por vírgula.`);
         
         const items = aiResponse.split(',').map(item => item.trim()).filter(item => item);
         
@@ -244,17 +266,14 @@ async function processShoppingItemWithAI(message, groupId) {
         return `🛒 ${addedCount} item(s) adicionado(s)!`;
         
     } catch (error) {
-        return "🛒 Use: 'item1, item2' ou 'mostrar lista'";
+        return "🛒 Use: 'item1, item2'";
     }
 }
 
-// 🧠 DETECÇÃO DE TIPO COM IA
+// 🔄 FUNÇÕES AUXILIARES
 async function detectGroupTypeWithAI(message) {
     try {
-        const detectionPrompt = `Esta mensagem é sobre entretenimento, gastos ou compras? Mensagem: "${message}" - Responda APENAS com: entretenimento, gastos ou compras.`;
-
-        const aiResponse = await callDeepSeekAI(detectionPrompt);
-        
+        const aiResponse = await callDeepSeekAI(`Categorize: "${message}" - Responda: entretenimento, gastos ou compras.`);
         const validTypes = ['entretenimento', 'gastos', 'compras'];
         const detectedType = aiResponse.toLowerCase().trim();
         
@@ -262,45 +281,16 @@ async function detectGroupTypeWithAI(message) {
             type: validTypes.includes(detectedType) ? detectedType : 'compras', 
             items: [] 
         };
-        
     } catch (error) {
         return { type: 'compras', items: [] };
     }
-}
-
-// 📊 FUNÇÕES AUXILIARES DO VEX
-function getExpensesSummary(groupId) {
-    const items = groupData[groupId].items;
-    if (!items || items.length === 0) return "💰 Nenhum gasto registrado!";
-    
-    const byCategory = {};
-    let total = 0;
-    
-    items.forEach(item => {
-        if (!byCategory[item.category]) {
-            byCategory[item.category] = { total: 0, items: [] };
-        }
-        byCategory[item.category].total += item.value;
-        byCategory[item.category].items.push(item);
-        total += item.value;
-    });
-    
-    let response = `💰 *RESUMO DE GASTOS* - Total: R$ ${total.toFixed(2)} (${items.length} gastos)\n\n`;
-    
-    Object.keys(byCategory).forEach(category => {
-        const catData = byCategory[category];
-        const percentage = ((catData.total / total) * 100).toFixed(1);
-        response += `📁 ${category.toUpperCase()}: R$ ${catData.total.toFixed(2)} (${percentage}%)\n`;
-    });
-    
-    return response;
 }
 
 function getShoppingList(groupId) {
     const items = groupData[groupId].items;
     if (!items || items.length === 0) return "🛒 Lista vazia!";
     
-    let response = `🛒 *LISTA DE COMPRAS* (${items.length} itens):\n\n`;
+    let response = `🛒 LISTA (${items.length} itens):\n\n`;
     items.forEach((item, index) => {
         response += `${index + 1}. ${item}\n`;
     });
@@ -319,61 +309,51 @@ function getGroupStatus(groupId, groupType) {
     
     switch(groupType) {
         case 'entretenimento':
-            return `🎬 ${count} itens na lista para assistir/ler`;
+            return `🎬 ${count} itens na lista`;
         case 'gastos':
             const total = items ? items.reduce((sum, item) => sum + item.value, 0) : 0;
             return `💰 ${count} gastos - Total: R$ ${total.toFixed(2)}`;
         case 'compras':
-            return `🛒 ${count} itens na lista de compras`;
+            return `🛒 ${count} itens na lista`;
         default:
-            return `📊 ${count} itens no grupo`;
+            return `📊 ${count} itens`;
     }
 }
 
 function getVexInfo(groupId) {
     const groupType = groupData[groupId] ? groupData[groupId].type : 'não definido';
     const itemsCount = groupData[groupId] && groupData[groupId].items ? groupData[groupId].items.length : 0;
-    const authorizedGroupsCount = authorizedGroups.size;
     
-    return `🤖 *INFORMAÇÕES DO VEX*
-    
-📊 *Status deste grupo:*
+    return `🤖 *VEX INFO*
 • Tipo: ${groupType}
 • Itens: ${itemsCount}
 • Autorizado: ✅ Sim
-
-🌐 *Status global:*
-• Grupos autorizados: ${authorizedGroupsCount}
-• IA: ${DEEPSEEK_API_KEY ? '✅ Conectada' : '❌ Desconectada'}
-
-💡 Use !ajuda para ver todos os comandos`;
+• IA: ${DEEPSEEK_API_KEY ? '✅' : '❌'}`;
 }
 
 function getSenderName(message) {
-    return message._data?.notifyName || message.author || message.from.split('@')[0];
+    return message._data?.notifyName || message.from.split('@')[0];
 }
 
 function getVexHelpMessage(groupType) {
-    const baseHelp = `🤖 *VEX BOT - AJUDA*
+    return `🤖 *VEX BOT - AJUDA*
 
-*Para me ativar em um grupo:*
-\`/adicionar vex\`
+*Ativar:* \`/adicionar vex\`
+*Remover:* \`/remover vex\`
 
-*Para me remover:*
-\`/remover vex\`
+*Comandos:*
+!ajuda - Esta mensagem
+!status - Status das listas  
+!limpar - Limpa dados
+!vexinfo - Info do Vex
 
-*Comandos do sistema:*
-!ajuda - Mostra esta mensagem
-!status - Status das listas
-!limpar - Limpa todos os dados
-!vexinfo - Informações do Vex
-
-*Funcionalidades automáticas:*
-🎬 *Entretenimento* - Envie nomes de filmes/séries
-💰 *Gastos* - "descrição valor" (ex: uber 25)
-🛒 *Compras* - "itens" (ex: leite, pão, ovos)`;
-
-    return baseHelp;
+*Uso automático:*
+🎬 Filmes/séries
+💰 "descrição valor"
+🛒 "itens, separados"`;
 }
 
+// INICIALIZAR
 client.initialize();
+
+console.log('🔄 Vex Bot iniciando...');
